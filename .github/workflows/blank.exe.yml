@@ -2,22 +2,22 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ main ]        # 推送到 main 時自動執行
-  workflow_dispatch:          # 允許在 Actions 分頁手動觸發
+    branches: [ main ]          # 推到 main 時自動執行
+  workflow_dispatch:            # 允許在 Actions 頁手動觸發
 
 permissions:
-  contents: write             # 讓 workflow 能把產物附加到 Release 或上傳 artifacts
+  contents: write               # 讓 workflow 有權限附加 artifacts / release
 
 jobs:
   build:
-    runs-on: windows-latest   # 使用 GitHub 提供的 Windows Server runner
+    runs-on: windows-latest
 
     steps:
     # 1. 取回原始碼
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 2. 安裝指定版本 Python
+    # 2. 設定 Python 3.11
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -31,11 +31,11 @@ jobs:
 
     # 4. 打包 scan.py → dist/scan.exe
     - name: Build scan.exe
-      working-directory: ${{ github.workspace }}   # 確保在 repo 根目錄
+      working-directory: ${{ github.workspace }}   # ★ 確保在 repo 根目錄
       run: |
         pyinstaller --onefile --noconsole --icon scan_icon.ico scan.py
 
-    # 5. 上傳產生的執行檔為 workflow artifact
+    # 5. 上傳可執行檔為 Artifact
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
