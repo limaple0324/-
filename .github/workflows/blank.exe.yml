@@ -2,11 +2,11 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ main ]          # 推到 main 時自動執行
-  workflow_dispatch:            # 允許在 Actions 頁手動觸發
+    branches: [ main ]          # 推到 main 就執行
+  workflow_dispatch:            # 允許在 Actions 手動執行
 
 permissions:
-  contents: write               # 讓 workflow 有權限附加 artifacts / release
+  contents: write               # 讓 workflow 能上傳 artifacts / release
 
 jobs:
   build:
@@ -23,15 +23,15 @@ jobs:
       with:
         python-version: "3.11"
 
-    # 3. 安裝 PyInstaller
-    - name: Install PyInstaller
+    # 3. 安裝 PyInstaller 與 numpy（之後若還有其他套件可一起加）
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
+        pip install pyinstaller numpy
 
     # 4. 打包 scan.py → dist/scan.exe
     - name: Build scan.exe
-      working-directory: ${{ github.workspace }}   # ★ 確保在 repo 根目錄
+      working-directory: ${{ github.workspace }}   # 確保在 repo 根目錄
       run: |
         pyinstaller --onefile --noconsole --icon scan_icon.ico scan.py
 
