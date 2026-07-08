@@ -25,6 +25,9 @@ jobs:
         pip install pyinstaller
 
     - name: Build scan.exe
+      working-directory: ${{ github.workspace }}
+      run: |
+        pyinstaller --onefile --noconsole --icon scan_icon.ico scan.py
       run: |
         pyinstaller --onefile --noconsole --icon scan_icon.ico scan.py
 
