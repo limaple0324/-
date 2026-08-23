@@ -1,0 +1,165 @@
+name: Build AutoReconnect V11.7 Standalone
+
+on:
+  push:
+    branches:
+      - build/autoreconnect-v117-standalone-20260823
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+          architecture: 'x64'
+          cache: 'pip'
+
+      - name: Reconstruct exact source archive
+        shell: pwsh
+        run: |
+          @'
+          import base64, hashlib, io, tarfile
+          from pathlib import Path
+          parts = sorted(Path('build_input').glob('part*.txt'))
+          if not parts:
+              raise SystemExit('No source parts')
+          encoded = ''.join(p.read_text(encoding='ascii') for p in parts)
+          raw = base64.b64decode(encoded)
+          got = hashlib.sha256(raw).hexdigest()
+          expected = '6a95cd69a207ad02ae38b64c1725bef5a65f15a13116bd3159545fca49d1cec1'
+          print('source archive sha256=', got)
+          if got != expected:
+              raise SystemExit(f'archive hash mismatch: {got}')
+          Path('src').mkdir(exist_ok=True)
+          with tarfile.open(fileobj=io.BytesIO(raw), mode='r:xz') as tf:
+              tf.extractall('src')
+          '@ | python -
+
+      - name: Apply final low-load monitor preparation
+        shell: pwsh
+        run: |
+          python build_input/prepare_source.py src
+          python -m py_compile src/app_entry.py src/control_panel.py src/smart_reconnect.py src/dpi_policy.py src/window_geometry.py
+
+      - name: Install Windows build dependencies
+        shell: pwsh
+        working-directory: src
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements-build.txt
+
+      - name: Build true standalone EXE
+        shell: pwsh
+        working-directory: src
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name AutoReconnect_V11_7_Standalone `
+            --icon assets/auto_reconnect_icon.ico `
+            --version-file version_info.txt `
+            --add-data 'templates;templates' `
+            --add-data 'roles;roles' `
+            --add-data 'assets;assets' `
+            --add-data 'config.json;.' `
+            --add-data 'bindings.json;.' `
+            --hidden-import win32gui `
+            --hidden-import win32api `
+            --hidden-import win32con `
+            --hidden-import win32ui `
+            --hidden-import pywintypes `
+            --hidden-import pythoncom `
+            --collect-all rapidocr_onnxruntime `
+            --collect-all onnxruntime `
+            app_entry.py
+
+      - name: Verify clean Windows runtime without Python on PATH
+        shell: pwsh
+        working-directory: src
+        run: |
+          $exe = (Resolve-Path 'dist/AutoReconnect_V11_7_Standalone.exe').Path
+          $oldPath = $env:PATH
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          & $exe --self-check-bundle
+          $code = $LASTEXITCODE
+          $env:PATH = $oldPath
+          if ($code -ne 0) { throw "Bundled self-check failed: $code" }
+          Get-Content "$env:TEMP\AutoReconnect_V11_7_selfcheck.txt"
+
+      - name: Verify monitor runs as AutoReconnect, never python.exe
+        shell: pwsh
+        working-directory: src
+        run: |
+          $exe = (Resolve-Path 'dist/AutoReconnect_V11_7_Standalone.exe').Path
+          $testLocal = Join-Path $pwd 'clean-localappdata'
+          New-Item -ItemType Directory -Force -Path $testLocal | Out-Null
+          $oldLocal = $env:LOCALAPPDATA
+          $env:LOCALAPPDATA = $testLocal
+          $p = Start-Process -FilePath $exe -ArgumentList '--monitor' -PassThru
+          Start-Sleep -Seconds 8
+          $rows = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe -or $_.ParentProcessId -eq $p.Id }
+          $bad = $rows | Where-Object { $_.Name -match '^pythonw?\.exe$' }
+          $rows | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath | Format-Table -AutoSize
+          if ($bad) { throw 'External Python process detected' }
+          $pidFile = Join-Path $testLocal 'SmartReconnect\monitor.pid'
+          if (!(Test-Path $pidFile)) { throw 'Monitor did not create monitor.pid' }
+          $stopFile = Join-Path $testLocal 'SmartReconnect\stop.signal'
+          'stop' | Set-Content -Encoding Ascii $stopFile
+          Start-Sleep -Seconds 4
+          Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $env:LOCALAPPDATA = $oldLocal
+
+      - name: Verify UI does not auto-start monitoring
+        shell: pwsh
+        working-directory: src
+        run: |
+          $text = Get-Content control_panel.py -Raw -Encoding UTF8
+          if ($text -notmatch 'BooleanVar\(value=False\)') { throw 'UI auto-start is not disabled' }
+          if ($text -match 'self\.after\(700,\s*self\.auto_start_if_needed\)') { throw 'UI still schedules automatic monitoring' }
+
+      - name: Build verification report
+        shell: pwsh
+        working-directory: src
+        run: |
+          $exe = (Resolve-Path 'dist/AutoReconnect_V11_7_Standalone.exe').Path
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $exe).Length
+          $smart = (Get-FileHash smart_reconnect.py -Algorithm SHA256).Hash.ToLower()
+          $panel = (Get-FileHash control_panel.py -Algorithm SHA256).Hash.ToLower()
+          $cfg = Get-Content config.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          @"
+          智慧重連 V11.7 Windows 11 真正獨立版 - Windows 建置驗證
+          建置平台：GitHub Actions Windows Server 2022 x64
+          封裝：PyInstaller onefile（單檔，Python 與所有必要套件內建）
+          目標：乾淨 Windows 11，不需要預裝 Python / OpenCV / NumPy / PyWin32 / OCR。
+          目標電腦啟動時：不下載、不安裝任何依賴。
+          外部 python.exe / pythonw.exe：自動測試未發現。
+          UI 自動啟動監控：否。
+          正常監測間隔秒：$($cfg.'正常監測間隔秒')
+          全域監看擷取最短間隔秒：$($cfg.'全域監看擷取最短間隔秒')
+          斷線 OCR 最短間隔秒：$($cfg.'斷線OCR最短間隔秒')
+          流程 OCR 並行數：$($cfg.'流程OCR並行數')
+          EXE size：$size
+          EXE SHA256：$hash
+          smart_reconnect.py SHA256：$smart
+          control_panel.py SHA256：$panel
+          "@ | Set-Content -Encoding UTF8 'dist/V11_7_Windows11_真正獨立版_驗證.txt'
+          Get-Content 'dist/V11_7_Windows11_真正獨立版_驗證.txt'
+
+      - name: Upload standalone artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoReconnect-V11.7-Windows11-Standalone
+          path: |
+            src/dist/AutoReconnect_V11_7_Standalone.exe
+            src/dist/V11_7_Windows11_真正獨立版_驗證.txt
+          if-no-files-found: error
+          retention-days: 7
