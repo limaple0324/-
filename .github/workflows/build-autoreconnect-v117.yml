@@ -3,6 +3,8 @@ name: Build AutoReconnect V11.7 Standalone
 on:
   push:
     branches: [ build-autoreconnect-v117-standalone ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
