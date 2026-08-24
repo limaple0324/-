@@ -1,0 +1,85 @@
+name: Build AutoReconnect V11.7 Standalone
+
+on:
+  push:
+    branches: [ build-autoreconnect-v117-standalone ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x64'
+
+      - name: Reconstruct and expand standalone source
+        shell: pwsh
+        run: |
+          @'
+          import base64
+          import hashlib
+          import zipfile
+          from pathlib import Path
+
+          parts = sorted(Path('build/source_parts').glob('part*.b64'))
+          if not parts:
+              raise SystemExit('No source parts found')
+          encoded = ''.join(p.read_text(encoding='ascii').strip() for p in parts)
+          raw = base64.b64decode(encoded, validate=True)
+          rebuilt = Path('build/autoreconnect_source_rebuilt.zip')
+          rebuilt.write_bytes(raw)
+          print('rebuilt zip bytes=', len(raw))
+          print('rebuilt sha256=', hashlib.sha256(raw).hexdigest())
+          with zipfile.ZipFile(rebuilt, 'r') as zf:
+              bad = zf.testzip()
+              print('zip entries=', len(zf.infolist()))
+              print('zip first entries=', [i.filename for i in zf.infolist()[:20]])
+              if bad:
+                  raise SystemExit(f'corrupt zip entry: {bad}')
+              Path('build_src').mkdir(exist_ok=True)
+              zf.extractall('build_src')
+          print('python zip extraction completed')
+          '@ | python -
+          Get-ChildItem build_src
+
+      - name: Build true standalone app and installer
+        shell: pwsh
+        working-directory: build_src
+        run: .\build_windows.ps1
+
+      - name: Show bundle self-check
+        if: always()
+        shell: pwsh
+        run: |
+          $p = Join-Path $env:TEMP 'AutoReconnect_V11_7_selfcheck.txt'
+          if (Test-Path $p) { Get-Content $p }
+
+      - name: Package installed application folder
+        shell: pwsh
+        run: Compress-Archive -Path build_src\dist\AutoReconnectV117\* -DestinationPath build_src\AutoReconnectV117_portable_folder.zip -Force
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoReconnect-V11.7-True-Standalone-Installer
+          path: build_src/installer_out/*.exe
+          if-no-files-found: error
+
+      - name: Upload portable folder for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoReconnect-V11.7-Portable-Folder
+          path: build_src/AutoReconnectV117_portable_folder.zip
+          if-no-files-found: error
