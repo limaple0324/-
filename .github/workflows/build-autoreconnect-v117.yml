@@ -3,8 +3,6 @@ name: Build AutoReconnect V11.7 Standalone
 on:
   push:
     branches: [ build-autoreconnect-v117-standalone ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -18,43 +16,72 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11 x64
+      - name: Set up Python 3.11 x64 for build only
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           architecture: 'x64'
 
-      - name: Reconstruct and expand standalone source
+      - name: Verify and extract final standalone source
         shell: pwsh
         run: |
           @'
-          import base64
           import hashlib
-          import zipfile
+          import tarfile
           from pathlib import Path
 
-          parts = sorted(Path('build/source_parts').glob('part*.b64'))
-          if not parts:
-              raise SystemExit('No source parts found')
-          encoded = ''.join(p.read_text(encoding='ascii').strip() for p in parts)
-          raw = base64.b64decode(encoded, validate=True)
-          rebuilt = Path('build/autoreconnect_source_rebuilt.zip')
-          rebuilt.write_bytes(raw)
-          print('rebuilt zip bytes=', len(raw))
-          print('rebuilt sha256=', hashlib.sha256(raw).hexdigest())
-          with zipfile.ZipFile(rebuilt, 'r') as zf:
-              bad = zf.testzip()
-              print('zip entries=', len(zf.infolist()))
-              print('zip first entries=', [i.filename for i in zf.infolist()[:20]])
-              if bad:
-                  raise SystemExit(f'corrupt zip entry: {bad}')
-              Path('build_src').mkdir(exist_ok=True)
-              zf.extractall('build_src')
-          print('python zip extraction completed')
+          archive = Path('final_source.tar.xz')
+          if not archive.is_file():
+              raise SystemExit('final_source.tar.xz missing')
+          raw = archive.read_bytes()
+          got = hashlib.sha256(raw).hexdigest()
+          expected = '1956f83b5fad8fd37afeb7b8757814cfeb72b5ecb8ecce7d3c6757f44e9b2093'
+          print('source bytes=', len(raw))
+          print('source sha256=', got)
+          if got != expected:
+              raise SystemExit(f'source hash mismatch: {got}')
+          out = Path('build_src')
+          out.mkdir(exist_ok=True)
+          with tarfile.open(archive, mode='r:xz') as tf:
+              tf.extractall(out)
+          files = [p for p in out.rglob('*') if p.is_file()]
+          print('source files=', len(files))
+          required = [
+              'app_entry.py', 'control_panel.py', 'smart_reconnect.py',
+              'dpi_policy.py', 'window_geometry.py', 'AutoReconnect.spec',
+              'build_windows.ps1', 'requirements-build.txt',
+              'assets/auto_reconnect_icon.ico', 'templates/disconnect_confirm.png'
+          ]
+          missing = [p for p in required if not (out / p).is_file()]
+          if missing:
+              raise SystemExit(f'missing source files: {missing}')
           '@ | python -
           Get-ChildItem build_src
 
-      - name: Build true standalone app and installer
+      - name: Compile source before packaging
+        shell: pwsh
+        working-directory: build_src
+        run: |
+          python -m py_compile app_entry.py control_panel.py smart_reconnect.py dpi_policy.py window_geometry.py
+
+      - name: Static single-process and low-load checks
+        shell: pwsh
+        working-directory: build_src
+        run: |
+          $panel = Get-Content control_panel.py -Raw -Encoding UTF8
+          if ($panel -notmatch 'BooleanVar\(value=False\)') { throw 'monitor default-off check failed' }
+          if ($panel -notmatch 'threading\.Thread') { throw 'same-process monitor thread check failed' }
+          $smart = Get-Content smart_reconnect.py -Raw -Encoding UTF8
+          if ($smart -notmatch 'detect_disconnect_dual\(frame, allow_ocr=False\)') { throw 'idle OCR gate missing' }
+          $cfg = Get-Content config.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ([double]$cfg.'背景擷取並行數' -ne 1) { throw 'capture concurrency is not 1' }
+          if ([double]$cfg.'流程OCR並行數' -ne 2) { throw 'OCR concurrency changed' }
+          if ([double]$cfg.'正常監測間隔秒' -lt 2.0) { throw 'normal monitor interval too aggressive' }
+          Write-Host "normal monitor interval=$($cfg.'正常監測間隔秒')"
+          Write-Host "capture concurrency=$($cfg.'背景擷取並行數')"
+          Write-Host "OCR concurrency=$($cfg.'流程OCR並行數')"
+
+      - name: Build true standalone Windows app
         shell: pwsh
         working-directory: build_src
         run: .\build_windows.ps1
@@ -66,20 +93,21 @@ jobs:
           $p = Join-Path $env:TEMP 'AutoReconnect_V11_7_selfcheck.txt'
           if (Test-Path $p) { Get-Content $p }
 
-      - name: Package installed application folder
+      - name: Verify delivery files
         shell: pwsh
-        run: Compress-Archive -Path build_src\dist\AutoReconnectV117\* -DestinationPath build_src\AutoReconnectV117_portable_folder.zip -Force
+        run: |
+          if (-not (Test-Path -LiteralPath 'build_src\dist\自動重連.exe')) { throw 'delivery EXE missing' }
+          if (-not (Test-Path -LiteralPath 'build_src\dist\V11_7_Windows11_真正單檔獨立版_驗證.txt')) { throw 'validation report missing' }
+          Get-Item -LiteralPath 'build_src\dist\自動重連.exe' | Format-List Name,Length,LastWriteTime
+          Get-FileHash -LiteralPath 'build_src\dist\自動重連.exe' -Algorithm SHA256
+          Get-Content -LiteralPath 'build_src\dist\V11_7_Windows11_真正單檔獨立版_驗證.txt'
 
-      - name: Upload installer
+      - name: Upload standalone EXE
         uses: actions/upload-artifact@v4
         with:
-          name: AutoReconnect-V11.7-True-Standalone-Installer
-          path: build_src/installer_out/*.exe
+          name: AutoReconnect-V11.7-Windows11-True-Standalone
+          path: |
+            build_src/dist/自動重連.exe
+            build_src/dist/V11_7_Windows11_真正單檔獨立版_驗證.txt
           if-no-files-found: error
-
-      - name: Upload portable folder for verification
-        uses: actions/upload-artifact@v4
-        with:
-          name: AutoReconnect-V11.7-Portable-Folder
-          path: build_src/AutoReconnectV117_portable_folder.zip
-          if-no-files-found: error
+          retention-days: 7
