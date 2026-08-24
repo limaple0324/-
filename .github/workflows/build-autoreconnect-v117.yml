@@ -27,15 +27,31 @@ jobs:
       - name: Reconstruct and expand standalone source
         shell: pwsh
         run: |
-          $parts = Get-ChildItem 'build/source_parts/part*.b64' | Sort-Object Name
-          if (-not $parts) { throw 'No source parts found' }
-          $encoded = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw -Encoding ASCII).Trim() }) -join ''
-          $bytes = [Convert]::FromBase64String($encoded)
-          [IO.File]::WriteAllBytes((Join-Path $PWD 'build/autoreconnect_source_rebuilt.zip'), $bytes)
-          $zip = Join-Path $PWD 'build/autoreconnect_source_rebuilt.zip'
-          Write-Host "rebuilt zip bytes=$((Get-Item $zip).Length)"
-          New-Item -ItemType Directory -Force -Path build_src | Out-Null
-          Expand-Archive -LiteralPath $zip -DestinationPath build_src -Force
+          @'
+          import base64
+          import hashlib
+          import zipfile
+          from pathlib import Path
+
+          parts = sorted(Path('build/source_parts').glob('part*.b64'))
+          if not parts:
+              raise SystemExit('No source parts found')
+          encoded = ''.join(p.read_text(encoding='ascii').strip() for p in parts)
+          raw = base64.b64decode(encoded, validate=True)
+          rebuilt = Path('build/autoreconnect_source_rebuilt.zip')
+          rebuilt.write_bytes(raw)
+          print('rebuilt zip bytes=', len(raw))
+          print('rebuilt sha256=', hashlib.sha256(raw).hexdigest())
+          with zipfile.ZipFile(rebuilt, 'r') as zf:
+              bad = zf.testzip()
+              print('zip entries=', len(zf.infolist()))
+              print('zip first entries=', [i.filename for i in zf.infolist()[:20]])
+              if bad:
+                  raise SystemExit(f'corrupt zip entry: {bad}')
+              Path('build_src').mkdir(exist_ok=True)
+              zf.extractall('build_src')
+          print('python zip extraction completed')
+          '@ | python -
           Get-ChildItem build_src
 
       - name: Build true standalone app and installer
